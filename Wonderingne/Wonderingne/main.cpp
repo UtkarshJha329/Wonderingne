@@ -8,6 +8,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #define VMA_IMPLEMENTATION
+//#define VMA_DEBUG_LOG_FORMAT(format, ...) do { \
+//       printf((format), __VA_ARGS__); \
+//       printf("\n"); \
+//   } while(false)
 #include "vma/vk_mem_alloc.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -35,6 +39,8 @@
 #include <array>
 
 #include <chrono>
+
+const int MAX_FRAMES_IN_FLIGHT = 2;
 
 static std::vector<char> ReadFile(const std::string& filename) {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
@@ -131,13 +137,45 @@ private:
         }
     };
 
+    struct Material {
+
+        int diffuseTextureIndex = -1;
+
+        int descriptorSetIndex = -1;
+
+        inline static std::vector<Material> allLoadedMaterials = {};
+    };
+
+    struct Texture {
+
+        std::string texturePath = "";
+
+        VkImage vk_TextureImage;
+        VmaAllocation vma_TextureImageAllocation;
+
+        VkImageView vk_TextureImageView;
+
+        inline static std::unordered_map<std::string, int> allLoadedTexturePathsWithMaterialIndex = {};
+        inline static std::vector<Texture> allLoadedTextures = {};
+    };
+
     struct Mesh {
 
     public:
         std::vector<Vertex> vertices = {};
         std::vector<uint32_t> indices = {};
 
-        std::string texturePath = "";
+        int materialIndex = -1;
+
+        VkBuffer vk_VertexBuffer;
+        VmaAllocation vma_VertexBufferAllocation;
+
+        VkBuffer vk_IndexBuffer;
+        VmaAllocation vma_IndexBufferAllocation;
+
+        std::vector<VkBuffer> vk_UniformBuffers;
+        std::vector<VmaAllocation> vk_UniformBuffersAllocations;
+
     };
 
     struct Model {
@@ -148,7 +186,7 @@ private:
         std::string directory = "";
         std::vector<Mesh> meshes = {};
 
-        void LoadModelDataAndSingleTexturePathWithAssimp() {
+        void LoadModelDataWithAssimp() {
 
             Assimp::Importer importer;
             const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs);
@@ -169,20 +207,25 @@ private:
             for (unsigned int i = 0; i < node->mNumMeshes; i++)
             {
                 aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
-                meshes.push_back(ProcessMesh(mesh, scene));
+
+                // Can be made faster by simply pre calculating the number of meshes and then passing around the index of the mesh in the meshes array to populate with data.
+                Mesh curMesh = {};
+                ProcessMesh(mesh, scene, curMesh);
+                meshes.push_back(curMesh);
+
+                //std::cout << "Node Meshes := " << node->mNumMeshes << std::endl;
             }
             for (unsigned int i = 0; i < node->mNumChildren; i++)
             {
                 //std::cout << "Processing children meshes." << std::endl;
                 ProcessNode(node->mChildren[i], scene);
+
+                //std::cout << "Children Meshes := " << node->mNumChildren << std::endl;
             }
         }
 
-        Mesh ProcessMesh(aiMesh* mesh, const aiScene* scene)
+        void ProcessMesh(aiMesh* mesh, const aiScene* scene, Mesh& curMesh)
         {
-            // data to fill
-            std::vector<Vertex> vertices;
-            std::vector<uint32_t> indices;
 
             // walk through each of the mesh's vertices
             for (unsigned int i = 0; i < mesh->mNumVertices; i++)
@@ -206,7 +249,7 @@ private:
                 else
                     vertex.texCoord = glm::vec2(0.0f, 0.0f);
 
-                vertices.push_back(vertex);
+                curMesh.vertices.push_back(vertex);
             }
 
             for (unsigned int i = 0; i < mesh->mNumFaces; i++)
@@ -214,47 +257,55 @@ private:
                 aiFace face = mesh->mFaces[i];
 
                 for (unsigned int j = 0; j < face.mNumIndices; j++) {
-                    indices.push_back(face.mIndices[j]);
+                    curMesh.indices.push_back(face.mIndices[j]);
                     //std::cout << indices[indices.size() - 1] << std::endl;
                 }
             }
 
-            return Mesh(vertices, indices, GetTypeTexturePath(scene->mMaterials[mesh->mMaterialIndex], aiTextureType_DIFFUSE, "texture_diffuse"));
+            CreateMaterialWithTexturesForMesh(scene->mMaterials[mesh->mMaterialIndex], curMesh);
+            //std::cout << "CALL 2 := " << " materialIndex : = " << curMesh.materialIndex << " textureIndex := " << Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex << std::endl;
         }
 
-        std::string GetTypeTexturePath(aiMaterial* mat, aiTextureType type, std::string typeName)
+        void CreateMaterialWithTexturesForMesh(aiMaterial* mat, Mesh& curMesh)
         {
+            aiTextureType type = aiTextureType_DIFFUSE;
             for (unsigned int i = 0; i < mat->GetTextureCount(type) && i < 1; i++)
             {
                 aiString str;
                 mat->GetTexture(type, i, &str);
 
-                return directory + "/" + std::string(str.C_Str());
+                std::string curTexturePathNameFull = directory + "/" + std::string(str.C_Str());
+                if (!Texture::allLoadedTexturePathsWithMaterialIndex.contains(curTexturePathNameFull)) {
+
+                    curMesh.materialIndex = Material::allLoadedMaterials.size();
+                    Material::allLoadedMaterials.push_back(Material());
+
+                    Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex = Texture::allLoadedTextures.size();
+                    Texture::allLoadedTextures.push_back(Texture());
+                    Texture::allLoadedTextures[Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex].texturePath = curTexturePathNameFull;
+
+                    Texture::allLoadedTexturePathsWithMaterialIndex[curTexturePathNameFull] = curMesh.materialIndex;
+
+                    //std::cout << "CALL 1 := " << "Added new material and texture.materialIndex : = " << curMesh.materialIndex << " textureIndex := " << Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex << std::endl;
+                }
+                else {
+                    curMesh.materialIndex = Texture::allLoadedTexturePathsWithMaterialIndex[curTexturePathNameFull];
+                }
+
             }
         }
 
     };
 
-    //const std::vector<Vertex> vertices = {  {{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    //                                        {{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    //                                        {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    //                                        {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}},
-
-    //                                        {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-    //                                        {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-    //                                        {{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-    //                                        {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}}
-    //                                    };
-
-    //const std::vector<uint16_t> indices = { 0, 1, 2, 2, 3, 0,
-    //                                        4, 5, 6, 6, 7, 4 };
-
     const std::string texturedSuzanneOBJModelFilePath = "Assets/Models/TexturedSuzanne/TexturedSuzanne.obj";
-
     const std::string texturedLowPolyForestTerrainOBJModelFilePath = "Assets/Models/LowPolyForestTerrain/LowPolyForestTerrain.obj";
 
     std::string currentModelFilePath = texturedLowPolyForestTerrainOBJModelFilePath;
-    Model currentModel;
+    Model model1;
+    Model model2;
+
+    std::vector<Model> allModelsThatNeedToBeLoadedAndRendered = { model1, model2 };
+    //std::vector<Model> allModelsThatNeedToBeLoadedAndRendered = { model1 };
 
 // APPLICATION PRIVATE FUNCTIONS
 private:
@@ -262,7 +313,7 @@ private:
     void MainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
-            DrawFrame(currentModel);
+            DrawFrame(allModelsThatNeedToBeLoadedAndRendered);
         }
     }
 
@@ -320,28 +371,24 @@ private:
         CreateDepthResources();
         CreateFramebuffers();
 
-        LoadSingleModel();
 
-        CreateTextureImage(currentModel.meshes[0].texturePath);
-        CreateTextureImageView();
-        CreateTextureSampler();
-
-        CreateVertexBuffer_VMA(currentModel);
-        CreateIndexBuffer_VMA(currentModel);
-        CreateUniformBuffers_VMA();
+        //LoadSingleModelDataToCPU(currentModel);
+        //UploadSingleModelToGPU(currentModel);
 
         CreateDescriptorPool();
-        CreateDescriptorSets();
+
+        CreateTextureSampler();
+
+        LoadAllModelsDataToCPU(allModelsThatNeedToBeLoadedAndRendered);
+        UploadAllModelsToGPU(allModelsThatNeedToBeLoadedAndRendered);
+
+        //CreateDescriptorSets();
 
         CreateCommandBuffers();
         CreateSyncObjects();
     }
 
     void VulkanCleanup() {
-
-        //vkDestroySemaphore(vk_LogicalDevice, imageAvailableSemaphore, nullptr);
-        //vkDestroySemaphore(vk_LogicalDevice, renderFinishedSemaphore, nullptr);
-        //vkDestroyFence(vk_LogicalDevice, inFlightFence, nullptr);
 
         vkDeviceWaitIdle(vk_LogicalDevice);
 
@@ -358,21 +405,20 @@ private:
 
 
 
-
-
-
-        vkDestroyImageView(vk_LogicalDevice, vk_TextureImageView, nullptr);
-        vmaDestroyImage(vma_Allocator, vk_TextureImage, vma_TextureImageAllocation);
-        vkDestroySampler(vk_LogicalDevice, vk_TextureSampler, nullptr);
-
-        vmaDestroyBuffer(vma_Allocator, vk_VertexBuffer, vma_VertexBufferAllocation);
-        vmaDestroyBuffer(vma_Allocator, vk_IndexBuffer, vma_IndexBufferAllocation);
-
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            vmaDestroyBuffer(vma_Allocator, vk_UniformBuffers[i], vk_UniformBuffersAllocations[i]);
+        for (int i = 0; i < allModelsThatNeedToBeLoadedAndRendered.size(); i++)
+        {
+            CleanUpModelData(allModelsThatNeedToBeLoadedAndRendered[i]);
         }
 
+        for (int i = 0; i < Texture::allLoadedTextures.size(); i++)
+        {
+            Texture& curTexture = Texture::allLoadedTextures[i];
 
+            vkDestroyImageView(vk_LogicalDevice, curTexture.vk_TextureImageView, nullptr);
+            vmaDestroyImage(vma_Allocator, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
+        }
+
+        vkDestroySampler(vk_LogicalDevice, vk_TextureSampler, nullptr);
 
 
 
@@ -396,6 +442,22 @@ private:
         vkDestroySurfaceKHR(vk_Instance, vk_Surface, nullptr);
         // destroy instance only after other vulkan resources are cleaned up.
         vkDestroyInstance(vk_Instance, nullptr);
+    }
+
+    void CleanUpModelData(Model& currentModel) {
+
+        for (int i = 0; i < currentModel.meshes.size(); i++)
+        {
+            Mesh& curMesh = currentModel.meshes[i];
+
+            vmaDestroyBuffer(vma_Allocator, curMesh.vk_VertexBuffer, curMesh.vma_VertexBufferAllocation);
+            vmaDestroyBuffer(vma_Allocator, curMesh.vk_IndexBuffer, curMesh.vma_IndexBufferAllocation);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                vmaDestroyBuffer(vma_Allocator, curMesh.vk_UniformBuffers[i], curMesh.vk_UniformBuffersAllocations[i]);
+            }
+
+        }
     }
 
     // VULKAN PRIVATE FUNCTIONS
@@ -738,6 +800,7 @@ private:
     }
 
     void CreateDescriptorSetLayout() {
+
         VkDescriptorSetLayoutBinding uboLayoutBinding{};
         uboLayoutBinding.binding = 0;
         uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -942,35 +1005,125 @@ private:
         }
     }
 
+    void LoadAllModelsDataToCPU(std::vector<Model>& allModels) {
 
-    void LoadSingleModel() {
-
-        currentModel.path = currentModelFilePath;
-
-        currentModel.LoadModelDataAndSingleTexturePathWithAssimp();
+        for (int i = 0; i < allModels.size(); i++)
+        {
+            if (i == 0) {
+                //allModels[i].path = texturedLowPolyForestTerrainOBJModelFilePath;
+                allModels[i].path = texturedSuzanneOBJModelFilePath;
+            }
+            else if (i == 1) {
+                //allModels[i].path = texturedSuzanneOBJModelFilePath;
+                allModels[i].path = texturedLowPolyForestTerrainOBJModelFilePath;
+            }
+            LoadSingleModelDataToCPU(allModels[i]);
+        }
     }
 
-    void UploadSingleModelToGPU() {
+    void LoadSingleModelDataToCPU(Model& _currentModel) {
 
-        CreateTextureImage(currentModel.meshes[0].texturePath);
-        CreateTextureImageView();
-        CreateTextureSampler();
+        //_currentModel.path = currentModelFilePath;
+        _currentModel.LoadModelDataWithAssimp();
 
-        CreateVertexBuffer_VMA(currentModel);
-        CreateIndexBuffer_VMA(currentModel);
-        CreateUniformBuffers_VMA();
+        Mesh& curMesh = _currentModel.meshes[0];
 
+        //std::cout << "CALL 3 := " << " materialIndex : = " << curMesh.materialIndex << " textureIndex := " << Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex << std::endl;
 
     }
 
-    void CreateTextureImage(std::string texturePath) {
+    void UploadAllModelsToGPU(std::vector<Model>& allModels) {
 
-        // "Textures/Statue Texture.jpg"
+        for (int i = 0; i < allModels.size(); i++)
+        {
+            UploadSingleModelToGPU(allModels[i]);
+        }
+
+    }
+
+    void UploadSingleModelToGPU(Model& _currentModel) {
+
+        for (int i = 0; i < _currentModel.meshes.size(); i++)
+        {
+            CreateTextureImageForMesh(_currentModel.meshes[i]);
+            CreateTextureImageViewForMesh(_currentModel.meshes[i]);
+
+            CreateVertexBuffer_VMA(_currentModel.meshes[i]);
+            CreateIndexBuffer_VMA(_currentModel.meshes[i]);
+
+            //TODO : Need to create separate buffers for each object or somehow increase the sizee of one and index into it in the shader or something.
+            CreateUniformBuffers_VMA(_currentModel.meshes[i]);
+
+            CreateMaterialDescriptorSetsForMesh(_currentModel.meshes[i]);
+        }
+    }
+
+    void CreateMaterialDescriptorSetsForMesh(Mesh& curMesh) {
+
+        Material& curMaterial = Material::allLoadedMaterials[curMesh.materialIndex];
+        if (curMaterial.descriptorSetIndex < 0) {
+
+            curMaterial.descriptorSetIndex = vk_DescriptorSetsPerMaterialForEachFlightFrame.size();
+            vk_DescriptorSetsPerMaterialForEachFlightFrame.push_back(std::array<VkDescriptorSet, 2>());
+
+            std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_DescriptorSetLayout);
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = vk_DescriptorPool;
+            allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+            allocInfo.pSetLayouts = layouts.data();
+
+            if (vkAllocateDescriptorSets(vk_LogicalDevice, &allocInfo, vk_DescriptorSetsPerMaterialForEachFlightFrame[curMaterial.descriptorSetIndex].data()) != VK_SUCCESS) {
+                throw std::runtime_error("failed to allocate descriptor sets!");
+            }
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+
+                VkDescriptorBufferInfo bufferInfo{};
+                bufferInfo.buffer = curMesh.vk_UniformBuffers[i];
+                bufferInfo.offset = 0;
+                bufferInfo.range = sizeof(UniformBufferObject);
+
+                VkDescriptorImageInfo imageInfo{};
+                imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfo.imageView = Texture::allLoadedTextures[curMaterial.diffuseTextureIndex].vk_TextureImageView;
+                imageInfo.sampler = vk_TextureSampler;
+
+                std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+
+                descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrites[0].dstSet = vk_DescriptorSetsPerMaterialForEachFlightFrame[curMaterial.descriptorSetIndex][i];
+                descriptorWrites[0].dstBinding = 0;
+                descriptorWrites[0].dstArrayElement = 0;
+                descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                descriptorWrites[0].descriptorCount = 1;
+                descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+                descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrites[1].dstSet = vk_DescriptorSetsPerMaterialForEachFlightFrame[curMaterial.descriptorSetIndex][i];
+                descriptorWrites[1].dstBinding = 1;
+                descriptorWrites[1].dstArrayElement = 0;
+                descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                descriptorWrites[1].descriptorCount = 1;
+                descriptorWrites[1].pImageInfo = &imageInfo;
+
+                vkUpdateDescriptorSets(vk_LogicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+            }
+
+        }
+
+    }
+
+    void CreateTextureImageForMesh(Mesh& currentMesh) {
+
+        Material& curMaterial = Material::allLoadedMaterials[currentMesh.materialIndex];
+        Texture& curTexture = Texture::allLoadedTextures[curMaterial.diffuseTextureIndex];
+        std::string curTexturePath = curTexture.texturePath;
 
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load(texturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(curTexturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         if (!pixels) {
-            throw std::runtime_error("failed to load texture image! path := " + texturePath);
+            throw std::runtime_error("failed to load texture image! path := " + curTexturePath);
         }
 
         uint64_t imageDataSize = texWidth * texHeight * 4;
@@ -986,17 +1139,21 @@ private:
 
         stbi_image_free(pixels);
 
-        CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vk_TextureImage, vma_TextureImageAllocation);
+        CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
 
-        TransitionImageLayout(vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        CopyBufferToImage(stagingBuffer, vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        TransitionImageLayout(vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        CopyBufferToImage(stagingBuffer, curTexture.vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
         vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
     }
 
-    void CreateTextureImageView() {
-        vk_TextureImageView = CreateImageView(vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+    void CreateTextureImageViewForMesh(Mesh& currentMesh) {
+
+        Material& curMaterial = Material::allLoadedMaterials[currentMesh.materialIndex];
+        Texture& curTexture = Texture::allLoadedTextures[curMaterial.diffuseTextureIndex];
+
+        curTexture.vk_TextureImageView = CreateImageView(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
     }
 
     void CreateTextureSampler() {
@@ -1032,61 +1189,54 @@ private:
         }
     }
 
-    void CreateVertexBuffer_VMA(const Model& modelToLoadToGPU) {
+    void CreateVertexBuffer_VMA(Mesh& currentMesh) {
 
-        //VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-        VkDeviceSize bufferSize = sizeof(modelToLoadToGPU.meshes[0].vertices[0]) * modelToLoadToGPU.meshes[0].vertices.size();
+        VkDeviceSize bufferSize = sizeof(currentMesh.vertices[0]) * currentMesh.vertices.size();
 
         VkBuffer stagingBuffer;
         VmaAllocation vma_StagingBufferAllocation;
         CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
 
-        //if (vmaCopyMemoryToAllocation(vma_Allocator, vertices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
-        if (vmaCopyMemoryToAllocation(vma_Allocator, modelToLoadToGPU.meshes[0].vertices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
+        if (vmaCopyMemoryToAllocation(vma_Allocator, currentMesh.vertices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
             throw std::runtime_error("failed to copy vertex data to staging buffer!");
         }
 
-        CreateBuffer_VMA(bufferSize, 0, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vk_VertexBuffer, vma_VertexBufferAllocation);
+        CreateBuffer_VMA(bufferSize, 0, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, currentMesh.vk_VertexBuffer, currentMesh.vma_VertexBufferAllocation);
 
-        CopyBuffer(stagingBuffer, vk_VertexBuffer, bufferSize);
+        CopyBuffer(stagingBuffer, currentMesh.vk_VertexBuffer, bufferSize);
         vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
-        //vmaFreeMemory(vma_Allocator, vma_StagingBufferAllocation);
     }
 
-    void CreateIndexBuffer_VMA(const Model& modelToLoadToGPU) {
+    void CreateIndexBuffer_VMA(Mesh& currentMesh) {
 
-        //VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
-        VkDeviceSize bufferSize = sizeof(modelToLoadToGPU.meshes[0].indices[0]) * modelToLoadToGPU.meshes[0].indices.size();
-
-        //std::cout << "size of indices struct := " << sizeof(modelToLoadToGPU.meshes[0].indices[0]) << ", size of indices := " << modelToLoadToGPU.meshes[0].indices.size() << std::endl;
+        VkDeviceSize bufferSize = sizeof(currentMesh.indices[0]) * currentMesh.indices.size();
 
         VkBuffer stagingBuffer;
         VmaAllocation vma_StagingBufferAllocation;
         CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
 
         //if (vmaCopyMemoryToAllocation(vma_Allocator, indices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
-        if (vmaCopyMemoryToAllocation(vma_Allocator, modelToLoadToGPU.meshes[0].indices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
+        if (vmaCopyMemoryToAllocation(vma_Allocator, currentMesh.indices.data(), vma_StagingBufferAllocation, 0, bufferSize) != VK_SUCCESS) {
             throw std::runtime_error("failed to copy vertex data to staging buffer!");
         }
 
-        CreateBuffer_VMA(bufferSize, 0, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vk_IndexBuffer, vma_IndexBufferAllocation);
+        CreateBuffer_VMA(bufferSize, 0, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, currentMesh.vk_IndexBuffer, currentMesh.vma_IndexBufferAllocation);
 
-        CopyBuffer(stagingBuffer, vk_IndexBuffer, bufferSize);
+        CopyBuffer(stagingBuffer, currentMesh.vk_IndexBuffer, bufferSize);
         vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
     }
 
-    void CreateUniformBuffers_VMA() {
+    void CreateUniformBuffers_VMA(Mesh& currentMesh) {
 
         VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
-        vk_UniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-        vk_UniformBuffersAllocations.resize(MAX_FRAMES_IN_FLIGHT);
-        vk_UniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+        currentMesh.vk_UniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        currentMesh.vk_UniformBuffersAllocations.resize(MAX_FRAMES_IN_FLIGHT);
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, vk_UniformBuffers[i], vk_UniformBuffersAllocations[i]);
+            CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, currentMesh.vk_UniformBuffers[i], currentMesh.vk_UniformBuffersAllocations[i]);
 
-            if (vmaCopyMemoryToAllocation(vma_Allocator, vk_UniformBuffers.data(), vk_UniformBuffersAllocations[i], 0, bufferSize) != VK_SUCCESS) {
+            if (vmaCopyMemoryToAllocation(vma_Allocator, currentMesh.vk_UniformBuffers.data(), currentMesh.vk_UniformBuffersAllocations[i], 0, bufferSize) != VK_SUCCESS) {
                 throw std::runtime_error("failed to copy vertex data to staging buffer!");
             }
         }
@@ -1096,88 +1246,34 @@ private:
 
     void CreateDescriptorPool() {
 
-        std::array<VkDescriptorPoolSize, 2> poolSizes{};
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        const int largeRandomNumberOfDescriptorSets = 100 * MAX_FRAMES_IN_FLIGHT;
+
+
+        std::array<VkDescriptorPoolSize, largeRandomNumberOfDescriptorSets> poolSizes{};
+
+        for (int i = 0; i < largeRandomNumberOfDescriptorSets / 2; i++)
+        {
+            poolSizes[i].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            poolSizes[i].descriptorCount = static_cast<uint32_t>(largeRandomNumberOfDescriptorSets / 2);
+        }
+
+        for (int i = largeRandomNumberOfDescriptorSets / 2; i < largeRandomNumberOfDescriptorSets; i++)
+        {
+            poolSizes[i].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSizes[i].descriptorCount = static_cast<uint32_t>(largeRandomNumberOfDescriptorSets / 2);
+        }
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
         poolInfo.pPoolSizes = poolSizes.data();
-        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        poolInfo.maxSets = static_cast<uint32_t>(largeRandomNumberOfDescriptorSets);
 
         if (vkCreateDescriptorPool(vk_LogicalDevice, &poolInfo, nullptr, &vk_DescriptorPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create descriptor pool!");
         }
     }
 
-    void CreateDescriptorSets() {
-
-        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_DescriptorSetLayout);
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = vk_DescriptorPool;
-        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
-        allocInfo.pSetLayouts = layouts.data();
-
-        vk_DescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
-        if (vkAllocateDescriptorSets(vk_LogicalDevice, &allocInfo, vk_DescriptorSets.data()) != VK_SUCCESS) {
-            throw std::runtime_error("failed to allocate descriptor sets!");
-        }
-
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-
-            VkDescriptorBufferInfo bufferInfo{};
-            bufferInfo.buffer = vk_UniformBuffers[i];
-            bufferInfo.offset = 0;
-            bufferInfo.range = sizeof(UniformBufferObject);
-
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = vk_TextureImageView;
-            imageInfo.sampler = vk_TextureSampler;
-
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
-
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = vk_DescriptorSets[i];
-            descriptorWrites[0].dstBinding = 0;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pBufferInfo = &bufferInfo;
-
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = vk_DescriptorSets[i];
-            descriptorWrites[1].dstBinding = 1;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pImageInfo = &imageInfo;
-
-            vkUpdateDescriptorSets(vk_LogicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
-        }
-    }
-
-    /*
-    //Only creates a single command buffer.
-    void CreateCommandBuffer() {
-
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.commandPool = vk_CommandPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-
-        if (vkAllocateCommandBuffers(vk_LogicalDevice, &allocInfo, &vk_CommandBuffer) != VK_SUCCESS) {
-            throw std::runtime_error("failed to allocate command buffers!");
-        }
-    }
-    */
-
-    
     void CreateCommandBuffers() {
         
         vk_CommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1192,24 +1288,6 @@ private:
             throw std::runtime_error("failed to allocate command buffers!");
         }
     }
-
-    /*
-    void CreateSyncObjects() {
-
-        VkSemaphoreCreateInfo semaphoreInfo{};
-        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-        if (vkCreateSemaphore(vk_LogicalDevice, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(vk_LogicalDevice, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
-            vkCreateFence(vk_LogicalDevice, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create semaphores or fences!!");
-        }
-    }
-    */
 
     void CreateSyncObjects() {
 
@@ -1276,7 +1354,7 @@ private:
 
 #pragma region Rendering
 
-    void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, const Model& model) {
+    void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, std::vector<Model>& modelsToRender) {
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1321,18 +1399,28 @@ private:
         scissor.extent = vk_SwapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        VkBuffer vertexBuffers[] = { vk_VertexBuffer };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-        
-        //vkCmdBindIndexBuffer(commandBuffer, vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT16);
-        vkCmdBindIndexBuffer(commandBuffer, vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        for (int i = 0; i < modelsToRender.size(); i++)
+        {
+            for (int j = 0; j < modelsToRender[i].meshes.size(); j++)
+            {
+                Mesh& curMesh = modelsToRender[i].meshes[j];
+                Material& curMaterial = Material::allLoadedMaterials[curMesh.materialIndex];
 
-        //vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+                VkBuffer vertexBuffers[] = { curMesh.vk_VertexBuffer };
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, 1, &vk_DescriptorSets[indexOfDataForCurrentFrame], 0, nullptr);
+                //vkCmdBindIndexBuffer(commandBuffer, vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT16);
+                vkCmdBindIndexBuffer(commandBuffer, curMesh.vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(model.meshes[0].indices.size()), 1, 0, 0, 0);
+                //vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, 1, &vk_DescriptorSetsPerMaterialForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame], 0, nullptr);
+
+                vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(curMesh.indices.size()), 1, 0, 0, 0);
+            }
+        }
+
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1341,53 +1429,7 @@ private:
         }
     }
 
-    /*
-    void DrawFrame() {
-
-        vkWaitForFences(vk_LogicalDevice, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(vk_LogicalDevice, 1, &inFlightFence);
-
-        uint32_t imageIndex;
-        vkAcquireNextImageKHR(vk_LogicalDevice, vk_SwapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
-
-        vkResetCommandBuffer(vk_CommandBuffer, 0);
-        RecordCommandBuffer(vk_CommandBuffer, imageIndex);
-
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore };
-        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = waitSemaphores;
-        submitInfo.pWaitDstStageMask = waitStages;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &vk_CommandBuffer;
-
-        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = signalSemaphores;
-
-        if (vkQueueSubmit(vk_GraphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
-            throw std::runtime_error("failed to submit draw command buffer!");
-        }
-
-        VkPresentInfoKHR presentInfo{};
-        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
-        presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = signalSemaphores;
-
-        VkSwapchainKHR swapChains[] = { vk_SwapChain };
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = swapChains;
-        presentInfo.pImageIndices = &imageIndex;
-
-        vkQueuePresentKHR(vk_PresentQueue, &presentInfo);
-    }
-    */
-
-    void DrawFrame(const Model& model) {
+    void DrawFrame(std::vector<Model>& modelsToRender) {
 
         vkWaitForFences(vk_LogicalDevice, 1, &inFlightFences[indexOfDataForCurrentFrame], VK_TRUE, UINT64_MAX);
 
@@ -1404,10 +1446,17 @@ private:
 
         vkResetFences(vk_LogicalDevice, 1, &inFlightFences[indexOfDataForCurrentFrame]);
 
-        UpdateUniformBuffer(indexOfDataForCurrentFrame);
-
         vkResetCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], 0);
-        RecordCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], imageIndex, model);
+
+        for (int i = 0; i < modelsToRender.size(); i++)
+        {
+            for (int j = 0; j < modelsToRender[i].meshes.size(); j++)
+            {
+                UpdateUniformBuffer(modelsToRender[i].meshes[j], indexOfDataForCurrentFrame);
+            }
+        }
+        
+        RecordCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], imageIndex, modelsToRender);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1452,7 +1501,7 @@ private:
         indexOfDataForCurrentFrame = (indexOfDataForCurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    void UpdateUniformBuffer(uint32_t indexOfDataForCurrentFrame) {
+    void UpdateUniformBuffer(Mesh& currentMesh, uint32_t indexOfDataForCurrentFrame) {
         static auto startTime = std::chrono::high_resolution_clock::now();
 
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -1471,7 +1520,7 @@ private:
         ubo.proj = glm::perspective(glm::radians(45.0f), vk_SwapChainExtent.width / (float)vk_SwapChainExtent.height, 0.1f, 1000.0f);
         ubo.proj[1][1] *= -1;
 
-        vmaCopyMemoryToAllocation(vma_Allocator, &ubo, vk_UniformBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(ubo));
+        vmaCopyMemoryToAllocation(vma_Allocator, &ubo, currentMesh.vk_UniformBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(ubo));
     }
 
 #pragma endregion
@@ -1862,43 +1911,11 @@ private:
 
     void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 
-        //VkCommandBufferAllocateInfo allocInfo{};
-        //allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        //allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-
-        //// VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV USE A SEPARATE COMMAND POOL SO THAT MEMORY ALLOCATION CAN BE OPTIMISED FOR INTERMEDIARY TRANSIENT BUFFERS VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
-        //allocInfo.commandPool = vk_CommandPool;
-
-        //allocInfo.commandBufferCount = 1;
-
-        //VkCommandBuffer transferCmdCommandBuffer;
-        //vkAllocateCommandBuffers(vk_LogicalDevice, &allocInfo, &transferCmdCommandBuffer);
-
-        //VkCommandBufferBeginInfo beginInfo{};
-        //beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        //beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        //vkBeginCommandBuffer(transferCmdCommandBuffer, &beginInfo);
-
         VkCommandBuffer transferCmdCommandBuffer = BeginSingleTimeCommands();
 
         VkBufferCopy copyRegion{};
-        //copyRegion.srcOffset = 0; // Optional
-        //copyRegion.dstOffset = 0; // Optional
         copyRegion.size = size;
         vkCmdCopyBuffer(transferCmdCommandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
-
-        //vkEndCommandBuffer(transferCmdCommandBuffer);
-
-        //VkSubmitInfo submitInfo{};
-        //submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        //submitInfo.commandBufferCount = 1;
-        //submitInfo.pCommandBuffers = &transferCmdCommandBuffer;
-
-        //vkQueueSubmit(vk_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        //vkQueueWaitIdle(vk_GraphicsQueue);
-
-        //vkFreeCommandBuffers(vk_LogicalDevice, vk_CommandPool, 1, &transferCmdCommandBuffer);
 
         EndSingleTimeCommands(transferCmdCommandBuffer);
     }
@@ -2074,16 +2091,6 @@ private:
     uint32_t indexOfDataForCurrentFrame = 0;
     bool framebufferResized = false;
 
-    VkBuffer vk_VertexBuffer;
-    VmaAllocation vma_VertexBufferAllocation;
-
-    VkBuffer vk_IndexBuffer;
-    VmaAllocation vma_IndexBufferAllocation;
-    //VkDeviceMemory vk_VertexBufferMemory;
-
-    VkImage vk_TextureImage;
-    VmaAllocation vma_TextureImageAllocation;
-    VkImageView vk_TextureImageView;
     VkSampler vk_TextureSampler;
 
     VkImage vk_DepthImage;
@@ -2091,19 +2098,13 @@ private:
     VkImageView vk_DepthImageView;
 
     VkDescriptorPool vk_DescriptorPool;
-    std::vector<VkDescriptorSet> vk_DescriptorSets;
-
-    std::vector<VkBuffer> vk_UniformBuffers;
-    std::vector<VmaAllocation> vk_UniformBuffersAllocations;
-    std::vector<void*> vk_UniformBuffersMapped;
+    std::vector<std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>> vk_DescriptorSetsPerMaterialForEachFlightFrame;
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
 #else
     const bool enableValidationLayers = true;
 #endif
-
-    const int MAX_FRAMES_IN_FLIGHT = 2;
 
 // APPLICATION PUBLIC VARIABLES
 public:
