@@ -3,6 +3,12 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+
+#Custom Ignore Files And Directories
+.\Wonderingne\Wonderingne\Assets
+
+
+
 # User-specific files
 *.rsuser
 *.suo
