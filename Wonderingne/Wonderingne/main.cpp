@@ -290,10 +290,12 @@ private:
                 std::string curTexturePathNameFull = directory + "/" + std::string(str.C_Str());
                 if (!Texture::allLoadedTexturePathsWithMaterialIndex.contains(curTexturePathNameFull)) {
 
-                    curMesh.materialIndex = Material::allLoadedMaterials.size();
+                    std::cout << "Newly added texture := " << curTexturePathNameFull << " to texture list to be loaded." << std::endl;
+
+                    curMesh.materialIndex = static_cast<int>(Material::allLoadedMaterials.size());
                     Material::allLoadedMaterials.push_back(Material());
 
-                    Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex = Texture::allLoadedTextures.size();
+                    Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex = static_cast<int>(Texture::allLoadedTextures.size());
                     Texture::allLoadedTextures.push_back(Texture());
                     Texture::allLoadedTextures[Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex].texturePath = curTexturePathNameFull;
 
@@ -302,6 +304,8 @@ private:
                     //std::cout << "CALL 1 := " << "Added new material and texture.materialIndex : = " << curMesh.materialIndex << " textureIndex := " << Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex << std::endl;
                 }
                 else {
+
+                    std::cout << "Already added texture := " << curTexturePathNameFull << " to texture list to be loaded." << std::endl;
                     curMesh.materialIndex = Texture::allLoadedTexturePathsWithMaterialIndex[curTexturePathNameFull];
                 }
 
@@ -310,10 +314,12 @@ private:
 
     };
 
+    const std::string texturedTruckOBJModelFilePath = "Assets/Models/Truck/Truck.obj";
+    const std::string texturedUtahTeapotOBJModelFilePath = "Assets/Models/UtahTeapot/UtahTeapot.obj";
     const std::string texturedSuzanneOBJModelFilePath = "Assets/Models/TexturedSuzanne/TexturedSuzanne.obj";
     const std::string texturedLowPolyForestTerrainOBJModelFilePath = "Assets/Models/LowPolyForestTerrain/LowPolyForestTerrain.obj";
 
-    std::vector<std::string> allModelsFilePaths = { texturedSuzanneOBJModelFilePath, texturedLowPolyForestTerrainOBJModelFilePath };
+    std::vector<std::string> allModelsFilePaths = { texturedSuzanneOBJModelFilePath, texturedTruckOBJModelFilePath, texturedLowPolyForestTerrainOBJModelFilePath, texturedUtahTeapotOBJModelFilePath };
     std::vector<Model> allModelsThatNeedToBeLoadedAndRendered = {};
 
 // APPLICATION PRIVATE FUNCTIONS
@@ -395,7 +401,7 @@ private:
         CreateDescriptorSetsForCameraData();
 
         LoadAllModelsDataToCPU(allModelsFilePaths, allModelsThatNeedToBeLoadedAndRendered);
-        UploadAllModelsToGPU(allModelsThatNeedToBeLoadedAndRendered);
+        UploadAllModelsAndMaterialDataToGPU(allModelsThatNeedToBeLoadedAndRendered);
 
         //CreateDescriptorSets();
 
@@ -1063,13 +1069,15 @@ private:
         //_currentModel.path = currentModelFilePath;
         _currentModel.LoadModelDataWithAssimp();
 
-        Mesh& curMesh = _currentModel.meshes[0];
+        //Mesh& curMesh = _currentModel.meshes[0];
 
         //std::cout << "CALL 3 := " << " materialIndex : = " << curMesh.materialIndex << " textureIndex := " << Material::allLoadedMaterials[curMesh.materialIndex].diffuseTextureIndex << std::endl;
 
     }
 
-    void UploadAllModelsToGPU(std::vector<Model>& allModels) {
+    void UploadAllModelsAndMaterialDataToGPU(std::vector<Model>& allModels) {
+
+        CreateTextureImageAndViewOnGPU();
 
         for (int i = 0; i < allModels.size(); i++)
         {
@@ -1082,9 +1090,6 @@ private:
 
         for (int i = 0; i < _currentModel.meshes.size(); i++)
         {
-            CreateTextureImageForMesh(_currentModel.meshes[i]);
-            CreateTextureImageViewForMesh(_currentModel.meshes[i]);
-
             CreateVertexBuffer_VMA(_currentModel.meshes[i]);
             CreateIndexBuffer_VMA(_currentModel.meshes[i]);
 
@@ -1100,7 +1105,7 @@ private:
         Material& curMaterial = Material::allLoadedMaterials[curMesh.materialIndex];
         if (curMaterial.descriptorSetIndex < 0) {
 
-            curMaterial.descriptorSetIndex = vk_DescriptorSetsForEachFlightFrame.size();
+            curMaterial.descriptorSetIndex = static_cast<int>(vk_DescriptorSetsForEachFlightFrame.size());
             vk_DescriptorSetsForEachFlightFrame.push_back(std::array<VkDescriptorSet, 2>());
 
             std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, Material::vk_DescriptorSetLayout);
@@ -1151,44 +1156,51 @@ private:
 
     }
 
-    void CreateTextureImageForMesh(Mesh& currentMesh) {
+    void CreateTextureImageAndViewOnGPU() {
 
-        Material& curMaterial = Material::allLoadedMaterials[currentMesh.materialIndex];
-        Texture& curTexture = Texture::allLoadedTextures[curMaterial.diffuseTextureIndex];
-        std::string curTexturePath = curTexture.texturePath;
+        for (int i = 0; i < Texture::allLoadedTextures.size(); i++)
+        {
+            Texture& curTexture = Texture::allLoadedTextures[i];
+            std::string curTexturePath = curTexture.texturePath;
 
-        int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load(curTexturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-        if (!pixels) {
-            throw std::runtime_error("failed to load texture image! path := " + curTexturePath);
+            int texWidth, texHeight, texChannels;
+            stbi_uc* pixels = stbi_load(curTexturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+            if (!pixels) {
+                throw std::runtime_error("failed to load texture image! path := " + curTexturePath);
+            }
+
+            uint64_t imageDataSize = texWidth * texHeight * 4;
+
+            VkBuffer stagingBuffer;
+            VmaAllocation vma_StagingBufferAllocation;
+
+            CreateBuffer_VMA(imageDataSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
+
+            if (vmaCopyMemoryToAllocation(vma_Allocator, pixels, vma_StagingBufferAllocation, 0, imageDataSize) != VK_SUCCESS) {
+                throw std::runtime_error("failed to copy texture data to staging buffer!");
+            }
+
+            stbi_image_free(pixels);
+
+            CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
+
+            std::cout << "Allocated Image Texture := " << curTexture.texturePath << std::endl;
+
+            std::string allocName = curTexture.texturePath + std::string(" = (Texture For Mesh Allocation)");
+            vmaSetAllocationName(vma_Allocator, curTexture.vma_TextureImageAllocation, allocName.c_str());
+
+
+            TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            CopyBufferToImage(stagingBuffer, curTexture.vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+            TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
+
+            CreateTextureImageViewForTexture(curTexture);
         }
-
-        uint64_t imageDataSize = texWidth * texHeight * 4;
-
-        VkBuffer stagingBuffer;
-        VmaAllocation vma_StagingBufferAllocation;
-
-        CreateBuffer_VMA(imageDataSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
-
-        if (vmaCopyMemoryToAllocation(vma_Allocator, pixels, vma_StagingBufferAllocation, 0, imageDataSize) != VK_SUCCESS) {
-            throw std::runtime_error("failed to copy texture data to staging buffer!");
-        }
-
-        stbi_image_free(pixels);
-
-        CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
-
-        TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        CopyBufferToImage(stagingBuffer, curTexture.vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-        vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
     }
 
-    void CreateTextureImageViewForMesh(Mesh& currentMesh) {
-
-        Material& curMaterial = Material::allLoadedMaterials[currentMesh.materialIndex];
-        Texture& curTexture = Texture::allLoadedTextures[curMaterial.diffuseTextureIndex];
+    void CreateTextureImageViewForTexture(Texture& curTexture) {
 
         curTexture.vk_TextureImageView = CreateImageView(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
     }
@@ -1301,7 +1313,7 @@ private:
 
     void CreateDescriptorSetsForCameraData() {
 
-        cameraUBODescriptorSetIndex = vk_DescriptorSetsForEachFlightFrame.size();
+        cameraUBODescriptorSetIndex = static_cast<int>(vk_DescriptorSetsForEachFlightFrame.size());
         vk_DescriptorSetsForEachFlightFrame.push_back(std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>());
 
         std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_CameraUBODescriptorSetLayout);
@@ -1509,7 +1521,7 @@ private:
 
                 std::array<VkDescriptorSet, 2> descriptorSetsToBindForThisDrawCommand = { vk_DescriptorSetsForEachFlightFrame[cameraUBODescriptorSetIndex][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame] };
 
-                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, descriptorSetsToBindForThisDrawCommand.size(), descriptorSetsToBindForThisDrawCommand.data(), 0, nullptr);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, static_cast<uint32_t>(descriptorSetsToBindForThisDrawCommand.size()), descriptorSetsToBindForThisDrawCommand.data(), 0, nullptr);
 
                 vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(curMesh.indices.size()), 1, 0, 0, 0);
             }
@@ -1553,8 +1565,6 @@ private:
                 UpdateModelUniformBuffer(modelsToRender[i].meshes[j], indexOfDataForCurrentFrame);
             }
         }
-        
-        //vkCmdBindDescriptorSets(vk_CommandBuffers[indexOfDataForCurrentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, 1, &vk_DescriptorSetsForEachFlightFrame[cameraUBODescriptorSetIndex][indexOfDataForCurrentFrame], 0, nullptr);
 
         RecordCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], imageIndex, modelsToRender);
 
