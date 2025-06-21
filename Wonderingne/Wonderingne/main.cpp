@@ -95,6 +95,7 @@ struct SimplePushConstantData {
 const int CAMERA_UBO_BINDING_LOCATION = 0;
 const int MODEL_UBO_BINDING_LOCATION = 1;
 const int SAMPLER_UBO_BINDING_LOCATION_IN_FRAG_SHADER = 2;
+const int UI_INSTANCE_MODEL_SSBO_BINDING_LOCATION = 3;
 
 class HelloTriangleApplication {
 public:
@@ -378,6 +379,8 @@ private:
     std::vector<std::string> allUIModelsFilePaths = { texturedPlaneOBJModelFilePath };
     std::vector<Model> allUIModelsThatNeedToBeLoadedAndRendered = {};
 
+    std::vector<glm::mat4> uiModelMatricesPerInstance;
+
 // APPLICATION PRIVATE FUNCTIONS
 private:
 
@@ -437,6 +440,10 @@ private:
 
         CreateDescriptorSetLayoutForMaterials();
         CreateDescriptorSetLayoutForCameraUBO();
+        CreateDescriptorSetLayoutForUIInstanceSSBO();
+
+
+
 
         CreateGraphicsPipeline();
 
@@ -452,6 +459,26 @@ private:
 
         InitCamerasAndData();
 
+
+        glm::mat4 modelA;
+        modelA = glm::mat4(1.0);
+        modelA = glm::translate(modelA, glm::vec3(1.0f, 0.5f, 0.0f));
+        modelA = glm::rotate(modelA, glm::radians(90.0f) * -1.0f, glm::vec3(1.0f, 0.0f, 0.0f));
+        modelA = glm::scale(modelA, glm::vec3(0.1f));
+
+        glm::mat4 modelB;
+        modelB = glm::mat4(1.0);
+        modelB = glm::translate(modelB, glm::vec3(-1.0f, 0.5f, 0.0f));
+        modelB = glm::rotate(modelB, glm::radians(90.0f) * -1.0f, glm::vec3(1.0f, 0.0f, 0.0f));
+        modelB = glm::scale(modelB, glm::vec3(0.1f));
+
+        uiModelMatricesPerInstance.push_back(modelA);
+        uiModelMatricesPerInstance.push_back(modelB);
+
+
+        CreateUIModelInstanceSSBOs_VMA();
+        CreateDescriptorSetsForUIInstanceSSBO();
+
         LoadAllModelsDataToCPU(allModelsFilePaths, allModelsThatNeedToBeLoadedAndRendered);
         UploadAllModelsAndMaterialDataToGPU(allModelsThatNeedToBeLoadedAndRendered);
 
@@ -462,6 +489,7 @@ private:
 
         CreateCommandBuffers();
         CreateSyncObjects();
+
     }
 
     void VulkanCleanup() {
@@ -491,6 +519,11 @@ private:
             CleanUpModelData(allUIModelsThatNeedToBeLoadedAndRendered[i]);
         }
 
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            vmaDestroyBuffer(vma_Allocator, vk_UI_Instance_Model_SSBOBuffers[i], vk_UI_Model_Instance_SSBOBuffersAllocations[i]);
+        }
+
         for (int i = 0; i < numCameras; i++)
         {
             for (int j = 0; j < MAX_FRAMES_IN_FLIGHT; j++)
@@ -518,6 +551,7 @@ private:
 
         vkDestroyDescriptorSetLayout(vk_LogicalDevice, Material::vk_DescriptorSetLayout, nullptr);
         vkDestroyDescriptorSetLayout(vk_LogicalDevice, vk_CameraUBODescriptorSetLayout, nullptr);
+        vkDestroyDescriptorSetLayout(vk_LogicalDevice, vk_uiSSBODescriptorSetLayout, nullptr);
 
         vkDestroyPipelineLayout(vk_LogicalDevice, vk_PipelineLayout, nullptr);
         vkDestroyRenderPass(vk_LogicalDevice, vk_RenderPass, nullptr);
@@ -575,7 +609,7 @@ private:
         appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
         appInfo.pEngineName = ENGINE_NAME.c_str();
         appInfo.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
-        appInfo.apiVersion = VK_API_VERSION_1_0;
+        appInfo.apiVersion = VK_API_VERSION_1_1;
         //appInfo.apiVersion = VK_API_VERSION_1_4;
 
         VkInstanceCreateInfo createInfo{};
@@ -691,6 +725,10 @@ private:
 
         VkPhysicalDeviceFeatures deviceFeatures{};
         deviceFeatures.samplerAnisotropy = VK_TRUE;
+        
+        VkPhysicalDeviceVulkan11Features features11 = {};
+        features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        features11.shaderDrawParameters = VK_TRUE;
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -699,6 +737,8 @@ private:
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
         createInfo.pEnabledFeatures = &deviceFeatures;
+
+        createInfo.pNext = &features11;
 
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -890,6 +930,8 @@ private:
         }
     }
 
+
+
     void CreateDescriptorSetLayoutForMaterials() {
 
         VkDescriptorSetLayoutBinding modelUBOLayoutBinding{};
@@ -937,7 +979,29 @@ private:
         }
     }
 
+    void CreateDescriptorSetLayoutForUIInstanceSSBO() {
 
+        VkDescriptorSetLayoutBinding uiSSBOLayoutBinding{};
+        uiSSBOLayoutBinding.binding = UI_INSTANCE_MODEL_SSBO_BINDING_LOCATION;
+        uiSSBOLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        //uiSSBOLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        uiSSBOLayoutBinding.descriptorCount = 1;
+        uiSSBOLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        std::array<VkDescriptorSetLayoutBinding, 1> bindings = { uiSSBOLayoutBinding };
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+
+        if (vkCreateDescriptorSetLayout(vk_LogicalDevice, &layoutInfo, nullptr, &vk_uiSSBODescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor set layout!");
+        }
+    }
+
+    
+    
     void CreateGraphicsPipeline() {
         auto vertShaderCode = ReadFile("Assets/Shaders/CompiledShaders/vert.spv");
         auto fragShaderCode = ReadFile("Assets/Shaders/CompiledShaders/frag.spv");
@@ -1034,7 +1098,7 @@ private:
         shaderDecidingPushConstantRange.size = sizeof(SimplePushConstantData);
 
 
-        std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = { vk_CameraUBODescriptorSetLayout, Material::vk_DescriptorSetLayout };
+        std::array<VkDescriptorSetLayout, 3> descriptorSetLayouts = { vk_CameraUBODescriptorSetLayout, Material::vk_DescriptorSetLayout, vk_uiSSBODescriptorSetLayout };
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
@@ -1404,6 +1468,23 @@ private:
         }
     }
 
+    void CreateUIModelInstanceSSBOs_VMA()
+    {
+        VkDeviceSize bufferSize = sizeof(glm::mat4) * uiModelMatricesPerInstance.size();
+
+        vk_UI_Instance_Model_SSBOBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        vk_UI_Model_Instance_SSBOBuffersAllocations.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, vk_UI_Instance_Model_SSBOBuffers[i], vk_UI_Model_Instance_SSBOBuffersAllocations[i]);
+            //vmaSetAllocationName(vma_Allocator, vk_CameraUniformBuffersAllocations[i], "camera buffer allocation");
+
+            if (vmaCopyMemoryToAllocation(vma_Allocator, uiModelMatricesPerInstance.data(), vk_UI_Model_Instance_SSBOBuffersAllocations[i], 0, bufferSize) != VK_SUCCESS) {
+                throw std::runtime_error("failed to copy ui model instance data to storage buffer!");
+            }
+        }
+    }
+
     void CreateDescriptorSetsForCameraData() {
 
         for (int i = 0; i < numCameras; i++)
@@ -1444,26 +1525,72 @@ private:
         }
     }
 
+    void CreateDescriptorSetsForUIInstanceSSBO() {
 
+        vk_UI_Instance_Model_SSBO_DescriptorSetIndex = static_cast<int>(vk_DescriptorSetsForEachFlightFrame.size());
+        vk_DescriptorSetsForEachFlightFrame.push_back(std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>());
+
+        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_uiSSBODescriptorSetLayout);
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = vk_DescriptorPool;
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        allocInfo.pSetLayouts = layouts.data();
+
+        if (vkAllocateDescriptorSets(vk_LogicalDevice, &allocInfo, vk_DescriptorSetsForEachFlightFrame[vk_UI_Instance_Model_SSBO_DescriptorSetIndex].data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate Instance SSBO descriptor set! Index := " + std::to_string(vk_UI_Instance_Model_SSBO_DescriptorSetIndex));
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = vk_UI_Instance_Model_SSBOBuffers[i];
+            bufferInfo.offset = 0;
+            //bufferInfo.range = VK_WHOLE_SIZE;
+            bufferInfo.range = sizeof(glm::mat4);
+
+            std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
+
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = vk_DescriptorSetsForEachFlightFrame[vk_UI_Instance_Model_SSBO_DescriptorSetIndex][i];
+            descriptorWrites[0].dstBinding = UI_INSTANCE_MODEL_SSBO_BINDING_LOCATION;
+            descriptorWrites[0].dstArrayElement = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+            //descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(vk_LogicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+        }
+    }
     
 
     void CreateDescriptorPool() {
 
-        const int largeRandomNumberOfDescriptorSets = 100 * MAX_FRAMES_IN_FLIGHT;
+        const int largeRandomNumberOfDescriptorSets = 333 * MAX_FRAMES_IN_FLIGHT;
 
 
         std::array<VkDescriptorPoolSize, largeRandomNumberOfDescriptorSets> poolSizes{};
 
-        for (int i = 0; i < largeRandomNumberOfDescriptorSets / 2; i++)
+        int eachPartSize = largeRandomNumberOfDescriptorSets / 3;
+
+        for (int i = 0; i < eachPartSize; i++)
         {
             poolSizes[i].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            poolSizes[i].descriptorCount = static_cast<uint32_t>(largeRandomNumberOfDescriptorSets / 2);
+            poolSizes[i].descriptorCount = static_cast<uint32_t>(eachPartSize);
         }
 
-        for (int i = largeRandomNumberOfDescriptorSets / 2; i < largeRandomNumberOfDescriptorSets; i++)
+        for (int i = 2 * eachPartSize; i < largeRandomNumberOfDescriptorSets; i++)
+        {
+            poolSizes[i].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+            //poolSizes[i].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSizes[i].descriptorCount = static_cast<uint32_t>(eachPartSize);
+        }
+
+        for (int i = eachPartSize; i < 2 * eachPartSize; i++)
         {
             poolSizes[i].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            poolSizes[i].descriptorCount = static_cast<uint32_t>(largeRandomNumberOfDescriptorSets / 2);
+            poolSizes[i].descriptorCount = static_cast<uint32_t>(eachPartSize);
         }
 
         VkDescriptorPoolCreateInfo poolInfo{};
@@ -1602,8 +1729,8 @@ private:
         scissor.extent = vk_SwapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        RenderModels(commandBuffer, allModelsThatNeedToBeLoadedAndRendered, 0, 0);
-        RenderModels(commandBuffer, allUIModelsThatNeedToBeLoadedAndRendered, 1, 1);
+        RenderModels(commandBuffer, allModelsThatNeedToBeLoadedAndRendered, 0, 0, 1);
+        RenderModels(commandBuffer, allUIModelsThatNeedToBeLoadedAndRendered, 1, 1, uiModelMatricesPerInstance.size());
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1612,7 +1739,7 @@ private:
         }
     }
 
-    void RenderModels(VkCommandBuffer& commandBuffer, std::vector<Model>& modelsToRender, int cameraIndex, int shaderFunctionIndex) {
+    void RenderModels(VkCommandBuffer& commandBuffer, std::vector<Model>& modelsToRender, int cameraIndex, int shaderFunctionIndex, uint32_t instanceCount) {
 
         SimplePushConstantData simplePushConstantData = {};
         simplePushConstantData.shaderFunctionUseID = shaderFunctionIndex;
@@ -1631,11 +1758,12 @@ private:
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(commandBuffer, curMesh.vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                std::array<VkDescriptorSet, 2> descriptorSetsToBindForThisDrawCommand = { vk_DescriptorSetsForEachFlightFrame[allCameraUBODescriptorSetIndices[cameraIndex]][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame] };
+                std::array<VkDescriptorSet, 3> descriptorSetsToBindForThisDrawCommand = { vk_DescriptorSetsForEachFlightFrame[allCameraUBODescriptorSetIndices[cameraIndex]][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[vk_UI_Instance_Model_SSBO_DescriptorSetIndex][indexOfDataForCurrentFrame] };
+                std::array<uint32_t, 1> dynamicOffsets = { 0 };
 
-                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, static_cast<uint32_t>(descriptorSetsToBindForThisDrawCommand.size()), descriptorSetsToBindForThisDrawCommand.data(), 0, nullptr);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, static_cast<uint32_t>(descriptorSetsToBindForThisDrawCommand.size()), descriptorSetsToBindForThisDrawCommand.data(), static_cast<uint32_t>(dynamicOffsets.size()), dynamicOffsets.data());
 
-                vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(curMesh.indices.size()), 1, 0, 0, 0);
+                vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(curMesh.indices.size()), instanceCount, 0, 0, 0);
             }
         }
     }
@@ -1672,6 +1800,11 @@ private:
             {
                 UpdateModelUniformBuffer(allModelsThatNeedToBeLoadedAndRendered[i].meshes[j], indexOfDataForCurrentFrame);
             }
+        }
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            UpdateUIModelInstanceDynamicShaderBuffer(i);
         }
 
         for (int i = 0; i < allUIModelsThatNeedToBeLoadedAndRendered.size(); i++)
@@ -1789,7 +1922,10 @@ private:
         vmaCopyMemoryToAllocation(vma_Allocator, &camera_ubos[indexOfCameraToUpdate], all_vk_CameraUniformBuffersAllocations[indexOfCameraToUpdate][indexOfDataForCurrentFrame], 0, sizeof(camera_ubos[indexOfCameraToUpdate]));
     }
 
+    void UpdateUIModelInstanceDynamicShaderBuffer(uint32_t indexOfDataForCurrentFrame) {
 
+        vmaCopyMemoryToAllocation(vma_Allocator, uiModelMatricesPerInstance.data(), vk_UI_Model_Instance_SSBOBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(glm::mat4) * uiModelMatricesPerInstance.size());
+    }
 
 #pragma endregion
 
@@ -1911,7 +2047,26 @@ private:
         VkPhysicalDeviceFeatures supportedFeatures;
         vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
 
-        return indices.IsComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy;
+
+
+        // TODO : Isolate and make optional
+
+        VkPhysicalDeviceShaderDrawParametersFeatures shaderDrawParametersFeatures = {};
+        shaderDrawParametersFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
+        shaderDrawParametersFeatures.pNext = nullptr;
+        shaderDrawParametersFeatures.shaderDrawParameters = VK_TRUE;
+
+        VkPhysicalDeviceFeatures2 features2 = {};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &shaderDrawParametersFeatures;
+
+        vkGetPhysicalDeviceFeatures2(device, &features2);
+
+
+
+
+
+        return indices.IsComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy && shaderDrawParametersFeatures.shaderDrawParameters;
     }
 
     bool CheckDeviceExtensionSupport(VkPhysicalDevice device) {
@@ -2344,15 +2499,16 @@ private:
     VkPipeline vk_GraphicsPipeline;
 
     VkDescriptorSetLayout vk_CameraUBODescriptorSetLayout;
+    VkDescriptorSetLayout vk_uiSSBODescriptorSetLayout;
 
     std::vector<VkFramebuffer> vk_SwapChainFramebuffers;
 
     VkCommandPool vk_CommandPool;
 
     std::vector<VkCommandBuffer> vk_CommandBuffers;
-    std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
+    std::vector<VkSemaphore> imageAvailableSemaphores;
 
     const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
     const std::vector<const char*> deviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
@@ -2375,6 +2531,9 @@ private:
     std::vector<std::vector<VkBuffer>> all_vk_CameraUniformBuffers;
     std::vector<std::vector<VmaAllocation>> all_vk_CameraUniformBuffersAllocations;
 
+    int vk_UI_Instance_Model_SSBO_DescriptorSetIndex = -1;
+    std::vector<VkBuffer> vk_UI_Instance_Model_SSBOBuffers;
+    std::vector<VmaAllocation> vk_UI_Model_Instance_SSBOBuffersAllocations;
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
