@@ -1,4 +1,3 @@
-
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -16,6 +15,9 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "StbImage/stb_image.h"
+
+#include "ft2build.h"
+#include FT_FREETYPE_H
 
 #include "assimp/Importer.hpp"
 #include "assimp/scene.h"
@@ -86,6 +88,9 @@ struct ModelUniformBufferObject {
     alignas(16) glm::mat4 model;
 };
 
+struct SimplePushConstantData {
+    alignas(16) uint32_t shaderFunctionUseID;
+};
 
 const int CAMERA_UBO_BINDING_LOCATION = 0;
 const int MODEL_UBO_BINDING_LOCATION = 1;
@@ -94,6 +99,10 @@ const int SAMPLER_UBO_BINDING_LOCATION_IN_FRAG_SHADER = 2;
 class HelloTriangleApplication {
 public:
     void Run() {
+
+        //InitFontLibrary();
+        //LoadFont();
+
         InitWindow();
         InitVulkan();
         MainLoop();
@@ -102,7 +111,43 @@ public:
 
 private:
 
-    // Mesh stuff
+// Freetype Font Stuff
+#pragma region Freetype Font Stuff
+
+private:
+    FT_Library freeTypelibrary;
+    FT_Face fontFace;
+
+private:
+    void InitFontLibrary() {
+        FT_Error result = FT_Init_FreeType(&freeTypelibrary);
+
+        if (result != FT_Err_Ok) {
+            throw std::runtime_error("ERROR::FREETYTPE: Failed to initialize Freetype font library. Error Code := " + std::to_string(result));
+        }
+    }
+
+    void LoadFont() {
+
+        FT_Error result = FT_New_Face(freeTypelibrary, "Assets/Fonts/cour.ttf", 0, &fontFace);
+        if (result != FT_Err_Ok) {
+            if (result == FT_Err_Unknown_File_Format) {
+                throw std::runtime_error("ERROR::FREETYTPE: Failed to initialize font face becuase of unknown file format error. Error Code := " + std::to_string(result));
+            }
+            else {
+                throw std::runtime_error("ERROR::FREETYTPE: Failed to initialize font face. Error Code := " + std::to_string(result));
+            }
+        }
+
+        //std::cout << "Number of faces in font file := " << fontFace->num_faces << std::endl;
+
+        FT_Set_Pixel_Sizes(fontFace, 0, 48);
+    }
+
+
+#pragma endregion
+
+// Mesh stuff
 private:
 
     struct Vertex {
@@ -164,6 +209,8 @@ private:
         VmaAllocation vma_TextureImageAllocation;
 
         VkImageView vk_TextureImageView;
+
+        bool loaded = false;
 
         inline static std::unordered_map<std::string, int> allLoadedTexturePathsWithMaterialIndex = {};
         inline static std::vector<Texture> allLoadedTextures = {};
@@ -318,9 +365,18 @@ private:
     const std::string texturedUtahTeapotOBJModelFilePath = "Assets/Models/UtahTeapot/UtahTeapot.obj";
     const std::string texturedSuzanneOBJModelFilePath = "Assets/Models/TexturedSuzanne/TexturedSuzanne.obj";
     const std::string texturedLowPolyForestTerrainOBJModelFilePath = "Assets/Models/LowPolyForestTerrain/LowPolyForestTerrain.obj";
+    const std::string texturedPlaneOBJModelFilePath = "Assets/Models/TexturedPlane/TexturedPlane.obj";
 
     std::vector<std::string> allModelsFilePaths = { texturedSuzanneOBJModelFilePath, texturedTruckOBJModelFilePath, texturedLowPolyForestTerrainOBJModelFilePath, texturedUtahTeapotOBJModelFilePath };
+    //std::vector<std::string> allModelsFilePaths = { texturedSuzanneOBJModelFilePath, texturedTruckOBJModelFilePath, texturedLowPolyForestTerrainOBJModelFilePath };
+    //std::vector<std::string> allModelsFilePaths = { texturedPlaneOBJModelFilePath };
+    //std::vector<std::string> allModelsFilePaths = {};
+    //std::vector<std::string> allModelsFilePaths = { texturedUtahTeapotOBJModelFilePath };
     std::vector<Model> allModelsThatNeedToBeLoadedAndRendered = {};
+
+
+    std::vector<std::string> allUIModelsFilePaths = { texturedPlaneOBJModelFilePath };
+    std::vector<Model> allUIModelsThatNeedToBeLoadedAndRendered = {};
 
 // APPLICATION PRIVATE FUNCTIONS
 private:
@@ -328,7 +384,7 @@ private:
     void MainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
-            DrawFrame(allModelsThatNeedToBeLoadedAndRendered);
+            DrawFrame();
         }
     }
 
@@ -390,18 +446,17 @@ private:
         CreateFramebuffers();
 
 
-        //LoadSingleModelDataToCPU(currentModel);
-        //UploadSingleModelToGPU(currentModel);
-
         CreateDescriptorPool();
 
         CreateTextureSampler();
 
-        CreateCameraUniformBuffers_VMA();
-        CreateDescriptorSetsForCameraData();
+        InitCamerasAndData();
 
         LoadAllModelsDataToCPU(allModelsFilePaths, allModelsThatNeedToBeLoadedAndRendered);
         UploadAllModelsAndMaterialDataToGPU(allModelsThatNeedToBeLoadedAndRendered);
+
+        LoadAllModelsDataToCPU(allUIModelsFilePaths, allUIModelsThatNeedToBeLoadedAndRendered);
+        UploadAllModelsAndMaterialDataToGPU(allUIModelsThatNeedToBeLoadedAndRendered);
 
         //CreateDescriptorSets();
 
@@ -431,9 +486,17 @@ private:
             CleanUpModelData(allModelsThatNeedToBeLoadedAndRendered[i]);
         }
 
-        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        for (int i = 0; i < allUIModelsThatNeedToBeLoadedAndRendered.size(); i++)
         {
-            vmaDestroyBuffer(vma_Allocator, vk_CameraUniformBuffers[i], vk_CameraUniformBuffersAllocations[i]);
+            CleanUpModelData(allUIModelsThatNeedToBeLoadedAndRendered[i]);
+        }
+
+        for (int i = 0; i < numCameras; i++)
+        {
+            for (int j = 0; j < MAX_FRAMES_IN_FLIGHT; j++)
+            {
+                vmaDestroyBuffer(vma_Allocator, all_vk_CameraUniformBuffers[i][j], all_vk_CameraUniformBuffersAllocations[i][j]);
+            }
         }
 
         for (int i = 0; i < Texture::allLoadedTextures.size(); i++)
@@ -964,11 +1027,20 @@ private:
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
         dynamicState.pDynamicStates = dynamicStates.data();
 
+
+        VkPushConstantRange shaderDecidingPushConstantRange = {};
+        shaderDecidingPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        shaderDecidingPushConstantRange.offset = 0;
+        shaderDecidingPushConstantRange.size = sizeof(SimplePushConstantData);
+
+
         std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = { vk_CameraUBODescriptorSetLayout, Material::vk_DescriptorSetLayout };
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
         pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &shaderDecidingPushConstantRange;
 
         if (vkCreatePipelineLayout(vk_LogicalDevice, &pipelineLayoutInfo, nullptr, &vk_PipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -1161,42 +1233,46 @@ private:
         for (int i = 0; i < Texture::allLoadedTextures.size(); i++)
         {
             Texture& curTexture = Texture::allLoadedTextures[i];
-            std::string curTexturePath = curTexture.texturePath;
 
-            int texWidth, texHeight, texChannels;
-            stbi_uc* pixels = stbi_load(curTexturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-            if (!pixels) {
-                throw std::runtime_error("failed to load texture image! path := " + curTexturePath);
+            if (curTexture.loaded == false) {
+                std::string curTexturePath = curTexture.texturePath;
+
+                int texWidth, texHeight, texChannels;
+                stbi_uc* pixels = stbi_load(curTexturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+                if (!pixels) {
+                    throw std::runtime_error("failed to load texture image! path := " + curTexturePath);
+                }
+
+                uint64_t imageDataSize = texWidth * texHeight * 4;
+
+                VkBuffer stagingBuffer;
+                VmaAllocation vma_StagingBufferAllocation;
+
+                CreateBuffer_VMA(imageDataSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
+
+                if (vmaCopyMemoryToAllocation(vma_Allocator, pixels, vma_StagingBufferAllocation, 0, imageDataSize) != VK_SUCCESS) {
+                    throw std::runtime_error("failed to copy texture data to staging buffer!");
+                }
+
+                stbi_image_free(pixels);
+
+                CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
+
+                std::cout << "Allocated Image Texture := " << curTexture.texturePath << std::endl;
+
+                std::string allocName = curTexture.texturePath + std::string(" = (Texture For Mesh Allocation)");
+                vmaSetAllocationName(vma_Allocator, curTexture.vma_TextureImageAllocation, allocName.c_str());
+
+
+                TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                CopyBufferToImage(stagingBuffer, curTexture.vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+                TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+                vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
+
+                CreateTextureImageViewForTexture(curTexture);
+                curTexture.loaded = true;
             }
-
-            uint64_t imageDataSize = texWidth * texHeight * 4;
-
-            VkBuffer stagingBuffer;
-            VmaAllocation vma_StagingBufferAllocation;
-
-            CreateBuffer_VMA(imageDataSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, vma_StagingBufferAllocation);
-
-            if (vmaCopyMemoryToAllocation(vma_Allocator, pixels, vma_StagingBufferAllocation, 0, imageDataSize) != VK_SUCCESS) {
-                throw std::runtime_error("failed to copy texture data to staging buffer!");
-            }
-
-            stbi_image_free(pixels);
-
-            CreateImage_VMA(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, curTexture.vk_TextureImage, curTexture.vma_TextureImageAllocation);
-
-            std::cout << "Allocated Image Texture := " << curTexture.texturePath << std::endl;
-
-            std::string allocName = curTexture.texturePath + std::string(" = (Texture For Mesh Allocation)");
-            vmaSetAllocationName(vma_Allocator, curTexture.vma_TextureImageAllocation, allocName.c_str());
-
-
-            TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            CopyBufferToImage(stagingBuffer, curTexture.vk_TextureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-            TransitionImageLayout(curTexture.vk_TextureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
-            vmaDestroyBuffer(vma_Allocator, stagingBuffer, vma_StagingBufferAllocation);
-
-            CreateTextureImageViewForTexture(curTexture);
         }
     }
 
@@ -1292,59 +1368,79 @@ private:
         }
     }
 
+    void InitCamerasAndData() {
+
+        for (int i = 0; i < numCameras; i++)
+        {
+            camera_ubos.push_back({});
+            allCameraUBODescriptorSetIndices.push_back({});
+
+            all_vk_CameraUniformBuffers.push_back({});
+            all_vk_CameraUniformBuffersAllocations.push_back({});
+        }
+
+        CreateCameraUniformBuffers_VMA();
+        CreateDescriptorSetsForCameraData();
+    }
     
     void CreateCameraUniformBuffers_VMA() {
 
         VkDeviceSize bufferSize = sizeof(CameraUniformBufferObject);
 
-        vk_CameraUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-        vk_CameraUniformBuffersAllocations.resize(MAX_FRAMES_IN_FLIGHT);
+        for (int i = 0; i < numCameras; i++)
+        {
+            all_vk_CameraUniformBuffers[i].resize(MAX_FRAMES_IN_FLIGHT);
+            all_vk_CameraUniformBuffersAllocations[i].resize(MAX_FRAMES_IN_FLIGHT);
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, vk_CameraUniformBuffers[i], vk_CameraUniformBuffersAllocations[i]);
-            //vmaSetAllocationName(vma_Allocator, vk_CameraUniformBuffersAllocations[i], "camera buffer allocation");
+            for (size_t j = 0; j < MAX_FRAMES_IN_FLIGHT; j++) {
+                CreateBuffer_VMA(bufferSize, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, all_vk_CameraUniformBuffers[i][j], all_vk_CameraUniformBuffersAllocations[i][j]);
+                //vmaSetAllocationName(vma_Allocator, vk_CameraUniformBuffersAllocations[i], "camera buffer allocation");
 
 
-            if (vmaCopyMemoryToAllocation(vma_Allocator, vk_CameraUniformBuffers.data(), vk_CameraUniformBuffersAllocations[i], 0, bufferSize) != VK_SUCCESS) {
-                throw std::runtime_error("failed to copy camera ubo data to staging buffer!");
+                if (vmaCopyMemoryToAllocation(vma_Allocator, all_vk_CameraUniformBuffers[i].data(), all_vk_CameraUniformBuffersAllocations[i][j], 0, bufferSize) != VK_SUCCESS) {
+                    throw std::runtime_error("failed to copy camera ubo data to staging buffer!");
+                }
             }
         }
     }
 
     void CreateDescriptorSetsForCameraData() {
 
-        cameraUBODescriptorSetIndex = static_cast<int>(vk_DescriptorSetsForEachFlightFrame.size());
-        vk_DescriptorSetsForEachFlightFrame.push_back(std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>());
+        for (int i = 0; i < numCameras; i++)
+        {
+            allCameraUBODescriptorSetIndices[i] = static_cast<int>(vk_DescriptorSetsForEachFlightFrame.size());
+            vk_DescriptorSetsForEachFlightFrame.push_back(std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>());
 
-        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_CameraUBODescriptorSetLayout);
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = vk_DescriptorPool;
-        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
-        allocInfo.pSetLayouts = layouts.data();
+            std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, vk_CameraUBODescriptorSetLayout);
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = vk_DescriptorPool;
+            allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+            allocInfo.pSetLayouts = layouts.data();
 
-        if (vkAllocateDescriptorSets(vk_LogicalDevice, &allocInfo, vk_DescriptorSetsForEachFlightFrame[cameraUBODescriptorSetIndex].data()) != VK_SUCCESS) {
-            throw std::runtime_error("failed to allocate descriptor sets!");
-        }
+            if (vkAllocateDescriptorSets(vk_LogicalDevice, &allocInfo, vk_DescriptorSetsForEachFlightFrame[allCameraUBODescriptorSetIndices[i]].data()) != VK_SUCCESS) {
+                throw std::runtime_error("failed to allocate camera descriptor set! Index := " + std::to_string(allCameraUBODescriptorSetIndices[i]));
+            }
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            for (size_t j = 0; j < MAX_FRAMES_IN_FLIGHT; j++) {
 
-            VkDescriptorBufferInfo bufferInfo{};
-            bufferInfo.buffer = vk_CameraUniformBuffers[i];
-            bufferInfo.offset = 0;
-            bufferInfo.range = sizeof(CameraUniformBufferObject);
+                VkDescriptorBufferInfo bufferInfo{};
+                bufferInfo.buffer = all_vk_CameraUniformBuffers[i][j];
+                bufferInfo.offset = 0;
+                bufferInfo.range = sizeof(CameraUniformBufferObject);
 
-            std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
+                std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
 
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = vk_DescriptorSetsForEachFlightFrame[cameraUBODescriptorSetIndex][i];
-            descriptorWrites[0].dstBinding = CAMERA_UBO_BINDING_LOCATION;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pBufferInfo = &bufferInfo;
+                descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrites[0].dstSet = vk_DescriptorSetsForEachFlightFrame[allCameraUBODescriptorSetIndices[i]][j];
+                descriptorWrites[0].dstBinding = CAMERA_UBO_BINDING_LOCATION;
+                descriptorWrites[0].dstArrayElement = 0;
+                descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                descriptorWrites[0].descriptorCount = 1;
+                descriptorWrites[0].pBufferInfo = &bufferInfo;
 
-            vkUpdateDescriptorSets(vk_LogicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+                vkUpdateDescriptorSets(vk_LogicalDevice, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+            }
         }
     }
 
@@ -1461,7 +1557,7 @@ private:
 
 #pragma region Rendering
 
-    void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, std::vector<Model>& modelsToRender) {
+    void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1506,6 +1602,22 @@ private:
         scissor.extent = vk_SwapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
+        RenderModels(commandBuffer, allModelsThatNeedToBeLoadedAndRendered, 0, 0);
+        RenderModels(commandBuffer, allUIModelsThatNeedToBeLoadedAndRendered, 1, 1);
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to record command buffer!");
+        }
+    }
+
+    void RenderModels(VkCommandBuffer& commandBuffer, std::vector<Model>& modelsToRender, int cameraIndex, int shaderFunctionIndex) {
+
+        SimplePushConstantData simplePushConstantData = {};
+        simplePushConstantData.shaderFunctionUseID = shaderFunctionIndex;
+        vkCmdPushConstants(commandBuffer, vk_PipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SimplePushConstantData), &simplePushConstantData);
+
         for (int i = 0; i < modelsToRender.size(); i++)
         {
             for (int j = 0; j < modelsToRender[i].meshes.size(); j++)
@@ -1519,23 +1631,16 @@ private:
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
                 vkCmdBindIndexBuffer(commandBuffer, curMesh.vk_IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-                std::array<VkDescriptorSet, 2> descriptorSetsToBindForThisDrawCommand = { vk_DescriptorSetsForEachFlightFrame[cameraUBODescriptorSetIndex][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame] };
+                std::array<VkDescriptorSet, 2> descriptorSetsToBindForThisDrawCommand = { vk_DescriptorSetsForEachFlightFrame[allCameraUBODescriptorSetIndices[cameraIndex]][indexOfDataForCurrentFrame], vk_DescriptorSetsForEachFlightFrame[curMaterial.descriptorSetIndex][indexOfDataForCurrentFrame] };
 
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_PipelineLayout, 0, static_cast<uint32_t>(descriptorSetsToBindForThisDrawCommand.size()), descriptorSetsToBindForThisDrawCommand.data(), 0, nullptr);
 
                 vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(curMesh.indices.size()), 1, 0, 0, 0);
             }
         }
-
-
-        vkCmdEndRenderPass(commandBuffer);
-
-        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-            throw std::runtime_error("failed to record command buffer!");
-        }
     }
 
-    void DrawFrame(std::vector<Model>& modelsToRender) {
+    void DrawFrame() {
 
         vkWaitForFences(vk_LogicalDevice, 1, &inFlightFences[indexOfDataForCurrentFrame], VK_TRUE, UINT64_MAX);
 
@@ -1556,21 +1661,28 @@ private:
 
 
 
-        UpdateCameraUniformBuffer(indexOfDataForCurrentFrame);
-
-        for (int i = 0; i < modelsToRender.size(); i++)
+        for (int i = 0; i < numCameras; i++)
         {
-            for (int j = 0; j < modelsToRender[i].meshes.size(); j++)
+            UpdateCameraUniformBuffer(indexOfDataForCurrentFrame, i);
+        }
+
+        for (int i = 0; i < allModelsThatNeedToBeLoadedAndRendered.size(); i++)
+        {
+            for (int j = 0; j < allModelsThatNeedToBeLoadedAndRendered[i].meshes.size(); j++)
             {
-                UpdateModelUniformBuffer(modelsToRender[i].meshes[j], indexOfDataForCurrentFrame);
+                UpdateModelUniformBuffer(allModelsThatNeedToBeLoadedAndRendered[i].meshes[j], indexOfDataForCurrentFrame);
             }
         }
 
-        RecordCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], imageIndex, modelsToRender);
+        for (int i = 0; i < allUIModelsThatNeedToBeLoadedAndRendered.size(); i++)
+        {
+            for (int j = 0; j < allUIModelsThatNeedToBeLoadedAndRendered[i].meshes.size(); j++)
+            {
+                UpdateUIModelUniformBuffer(allUIModelsThatNeedToBeLoadedAndRendered[i].meshes[j], indexOfDataForCurrentFrame);
+            }
+        }
 
-
-
-
+        RecordCommandBuffer(vk_CommandBuffers[indexOfDataForCurrentFrame], imageIndex);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1630,18 +1742,51 @@ private:
         vmaCopyMemoryToAllocation(vma_Allocator, &model_ubo, currentMesh.vk_ModelUniformBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(model_ubo));
     }
 
-    void UpdateCameraUniformBuffer(uint32_t indexOfDataForCurrentFrame) {
+    void UpdateUIModelUniformBuffer(Mesh& currentMesh, uint32_t indexOfDataForCurrentFrame) {
 
-        CameraUniformBufferObject camera_ubo{};
+        static auto startTime = std::chrono::high_resolution_clock::now();
 
-        glm::vec3 cameraPos = glm::vec3(5.0f);
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
-        camera_ubo.view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        camera_ubo.proj = glm::perspective(glm::radians(45.0f), vk_SwapChainExtent.width / (float)vk_SwapChainExtent.height, 0.1f, 1000.0f);
-        camera_ubo.proj[1][1] *= -1;
+        ModelUniformBufferObject model_ubo{};
 
+        model_ubo.model = glm::mat4(1.0);
+        model_ubo.model = glm::rotate(model_ubo.model, glm::radians(90.0f) * -1.0f, glm::vec3(1.0f, 0.0f, 0.0f));
+        //model_ubo.model = glm::rotate(model_ubo.model, time * glm::radians(90.0f) * -1.0f, glm::vec3(0.0f, 0.0f, 1.0f));
+        model_ubo.model = glm::scale(model_ubo.model, glm::vec3(0.1f));
 
-        vmaCopyMemoryToAllocation(vma_Allocator, &camera_ubo, vk_CameraUniformBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(camera_ubo));
+        vmaCopyMemoryToAllocation(vma_Allocator, &model_ubo, currentMesh.vk_ModelUniformBuffersAllocations[indexOfDataForCurrentFrame], 0, sizeof(model_ubo));
+    }
+
+    void UpdateCameraUniformBuffer(uint32_t indexOfDataForCurrentFrame, int indexOfCameraToUpdate) {
+
+        if (indexOfCameraToUpdate == 0) {
+            glm::vec3 cameraPos = glm::vec3(5.0f);
+
+            camera_ubos[indexOfCameraToUpdate].view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            camera_ubos[indexOfCameraToUpdate].proj = glm::perspective(glm::radians(45.0f), vk_SwapChainExtent.width / (float)vk_SwapChainExtent.height, 0.1f, 1000.0f);
+            camera_ubos[indexOfCameraToUpdate].proj[1][1] *= -1;
+        }
+        else if (indexOfCameraToUpdate == 1) {
+
+            glm::vec3 cameraPos = glm::vec3(0.0f, 10.0f, 0.0f);
+            camera_ubos[indexOfCameraToUpdate].view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+            //float x = static_cast<float>(vk_SwapChainExtent.width) * 0.5f;
+            float x = 1.0f;
+            float y = static_cast<float>(vk_SwapChainExtent.height) / static_cast<float>(vk_SwapChainExtent.width);
+
+            camera_ubos[indexOfCameraToUpdate].proj = glm::ortho(-1.0f, 1.0f, -y, y, 0.1f, 1000.0f);
+
+            //glm::vec3 cameraPos = glm::vec3(5.0f);
+
+            //camera_ubos[indexOfCameraToUpdate].view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            //camera_ubos[indexOfCameraToUpdate].proj = glm::perspective(glm::radians(45.0f), vk_SwapChainExtent.width / (float)vk_SwapChainExtent.height, 0.1f, 1000.0f);
+            //camera_ubos[indexOfCameraToUpdate].proj[1][1] *= -1;
+        }
+
+        vmaCopyMemoryToAllocation(vma_Allocator, &camera_ubos[indexOfCameraToUpdate], all_vk_CameraUniformBuffersAllocations[indexOfCameraToUpdate][indexOfDataForCurrentFrame], 0, sizeof(camera_ubos[indexOfCameraToUpdate]));
     }
 
 
@@ -2224,9 +2369,12 @@ private:
     VkDescriptorPool vk_DescriptorPool;
     std::vector<std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>> vk_DescriptorSetsForEachFlightFrame;
 
-    int cameraUBODescriptorSetIndex = -1;
-    std::vector<VkBuffer> vk_CameraUniformBuffers;
-    std::vector<VmaAllocation> vk_CameraUniformBuffersAllocations;
+    int numCameras = 2;
+    std::vector<CameraUniformBufferObject> camera_ubos = { {} };
+    std::vector<int> allCameraUBODescriptorSetIndices = { {} };
+    std::vector<std::vector<VkBuffer>> all_vk_CameraUniformBuffers;
+    std::vector<std::vector<VmaAllocation>> all_vk_CameraUniformBuffersAllocations;
+
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
