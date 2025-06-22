@@ -137,6 +137,27 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="BindingDescriptions.h" />
+    <ClInclude Include="Camera.h" />
+    <ClInclude Include="CameraUtils.h" />
+    <ClInclude Include="CreateVulkanGraphicsPipeline.h" />
+    <ClInclude Include="DependencyIncludes.h" />
+    <ClInclude Include="EngineConstants.h" />
+    <ClInclude Include="Model.h" />
+    <ClInclude Include="ModelUtils.h" />
+    <ClInclude Include="StandardIncludes.h" />
+    <ClInclude Include="ShaderMemoryVariables.h" />
+    <ClInclude Include="UI.h" />
+    <ClInclude Include="UIUtils.h" />
+    <ClInclude Include="VulkanCreateUtils.h" />
+    <ClInclude Include="VulkanDebugUtils.h" />
+    <ClInclude Include="VulkanSwapChianUtils.h" />
+    <ClInclude Include="VulkanEngineVariables.h" />
+    <ClInclude Include="VulkanHandlingFunctions.h" />
+    <ClInclude Include="VulkanInitUtils.h" />
+    <ClInclude Include="VulkanRenderingFunctions.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
